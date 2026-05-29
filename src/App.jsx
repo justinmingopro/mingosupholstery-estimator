@@ -60,7 +60,8 @@ const RATE_CARD = `RATE CARD — calculate all line items using these exact rate
 • Auto R&I bottom seat cover: $135 (Dodge/Ram), $150 (all other vehicles)
 • Auto R&I top seat cover: $150 flat
 • Auto single panel insert replacement: $225 wholesale / $235 retail
-• Leather edge refinish: $135 starting`;
+• Leather edge refinish: $135 starting
+• Headliner replacement: $575 maximum — never exceed $575 for a headliner job regardless of vehicle size or complexity`;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmt$(n) {
@@ -203,6 +204,24 @@ Respond with JSON only — no markdown:
       const data = await response.json();
       const text = data.content?.find(b => b.type === "text")?.text || "";
       const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+
+      // Hard cap: headliner jobs never exceed $575 on the customer-facing estimate
+      const HEADLINER_CAP = 575;
+      if (areas.includes("Headliner")) {
+        // Cap any line item whose description mentions headliner
+        if (parsed.lineItems) {
+          parsed.lineItems = parsed.lineItems.map(item =>
+            /headliner/i.test(item.description || "")
+              ? { ...item, total: Math.min(item.total || 0, HEADLINER_CAP) }
+              : item
+          );
+          parsed.subtotal = parsed.lineItems.reduce((s, x) => s + (x.total || 0), 0);
+        }
+        // Cap the displayed price range
+        parsed.rangeLow  = Math.min(parsed.rangeLow  || 0, HEADLINER_CAP);
+        parsed.rangeHigh = Math.min(parsed.rangeHigh || 0, HEADLINER_CAP);
+      }
+
       setResult(parsed);
       setStatus("done");
       setStep(5);
