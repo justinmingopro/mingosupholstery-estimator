@@ -1,3 +1,21 @@
+// Map customer-facing job types to the closest Zoho item name used in the PM.
+// The PM requires exact Zoho item names for CSV export compatibility.
+const JOB_TYPE_TO_ZOHO = {
+  "Auto":      "Interior Repair - Retail",
+  "Marine":    "Marine Reupholstery - Retail",
+  "RV":        "RV - Reupholstery Retail",
+  "Furniture": "Furniture Reupholstery - Retail",
+};
+
+function genId() {
+  return "t_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6);
+}
+
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -81,6 +99,106 @@ export default async function handler(req, res) {
       }
     } catch (e) {
       errors.push("SMS error: " + e.message);
+    }
+  }
+
+  // ── 3. Create estimate card in PM (project_data → estimates board) ───────────
+  if (supabaseUrl && supabaseKey) {
+    try {
+      const headers = {
+        "Content-Type": "application/json",
+        "apikey":        supabaseKey,
+        "Authorization": `Bearer ${supabaseKey}`,
+      };
+
+      // Read current project_data
+      const readResp = await fetch(
+        `${supabaseUrl}/rest/v1/project_data?key=eq.main&select=data`,
+        { headers }
+      );
+      const readJson   = await readResp.json();
+      const current    = readJson?.[0]?.data || { me: [], jude: [], estimates: [] };
+
+      // Build PM-compatible line items from the customer estimator format
+      const defaultItemName = JOB_TYPE_TO_ZOHO[jobType] || "Reupholstery Retail";
+      const lineItems = (estimateData?.lineItems || []).map(item => ({
+        id:        genId(),
+        itemName:  defaultItemName,
+        qty:       item.qty       || 1,
+        unitPrice: item.unitPrice || 0,
+        notes:     item.description || "",
+      }));
+
+      // Fallback: if no line items came through, create one summary row
+      if (!lineItems.length && estimateData?.subtotal) {
+        lineItems.push({
+          id:        genId(),
+          itemName:  defaultItemName,
+          qty:       1,
+          unitPrice: estimateData.subtotal,
+          notes:     estimateData.summary || `${jobType} estimate from web form`,
+        });
+      }
+
+      // Use the subtotal as the stored total (range shown in description)
+      const estimateTotal = estimateData?.subtotal
+        || estimateData?.rangeLow
+        || 0;
+
+      // Build a readable description combining all the form fields
+      const parts = [
+        estimateData?.summary || "",
+        vehicleType                  ? `Vehicle: ${vehicleType}` : "",
+        areas?.length                ? `Areas: ${areas.join(", ")}` : "",
+        material                     ? `Material preference: ${material}` : "",
+        notes                        ? `Notes: ${notes}` : "",
+        estimateData?.notes          ? `Estimator notes: ${estimateData.notes}` : "",
+        estimateData?.rangeLow != null
+          ? `Price range: $${estimateData.rangeLow}–$${estimateData.rangeHigh}` : "",
+      ].filter(Boolean).join("\n");
+
+      const toE164    = phone.replace(/\D/g, "");
+      const e164Phone = toE164.startsWith("1") ? `+${toE164}` : `+1${toE164}`;
+      const dateLabel = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
+
+      const newEstimate = {
+        id:             genId(),
+        title:          `Web Lead — ${jobType}${vehicleType ? ` (${vehicleType})` : ""} (${dateLabel})`,
+        description:    parts,
+        whatToDo:       estimateData?.summary || "",
+        status:         "Needs Review",
+        priority:       "Medium",
+        dueDate:        "",
+        quoteDate:      todayStr(),
+        quoteNumber:    "",
+        contactName:    "",
+        contactPhone:   e164Phone,
+        contactEmail:   "",
+        commission:     "",
+        paidCommission: "",
+        estimateTotal:  String(estimateTotal),
+        lineItems,
+        attachments:    [],
+        createdAt:      Date.now(),
+      };
+
+      const updated = {
+        ...current,
+        estimates: [...(current.estimates || []), newEstimate],
+      };
+
+      const writeResp = await fetch(`${supabaseUrl}/rest/v1/project_data`, {
+        method: "POST",
+        headers: { ...headers, "Prefer": "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ key: "main", data: updated, updated_at: new Date().toISOString() }),
+      });
+
+      if (!writeResp.ok) {
+        const txt = await writeResp.text();
+        errors.push("PM card: " + txt);
+      }
+    } catch (e) {
+      errors.push("PM card error: " + e.message);
     }
   }
 
